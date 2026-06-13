@@ -8,7 +8,6 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
-LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "").strip()
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
@@ -79,65 +78,65 @@ def get_spotify_tracks(token):
     return tracks[:12]
 
 
-# ---------- Apple Music (iTunes Search API, no key needed) ----------
-def get_apple_tracks():
-    """iTunes Search API — genreId 7 = Dance. Free, no auth."""
+# ---------- Deezer (public API, no key) ----------
+def get_deezer_tracks():
+    """Deezer public API. Search by genre, sort by rank. No auth needed."""
     tracks, seen = [], set()
     try:
         for term in ["house", "tech house", "deep house"]:
             r = requests.get(
-                "https://itunes.apple.com/search",
-                params={"term": term, "entity": "song", "genreId": "7",
-                        "limit": 6, "country": "US"},
+                "https://api.deezer.com/search",
+                params={"q": f'genre:"{term}"' if False else term, "order": "RANKING", "limit": 8},
                 headers={"User-Agent": UA},
                 timeout=15,
             )
-            print(f"Apple '{term}': HTTP {r.status_code}")
+            print(f"Deezer '{term}': HTTP {r.status_code}")
             if r.status_code != 200:
                 continue
-            for item in r.json().get("results", []):
-                name = item.get("trackName", "")
-                artist = item.get("artistName", "")
-                url = item.get("trackViewUrl", "")
+            data = r.json().get("data", [])
+            # sort by rank desc when present
+            data.sort(key=lambda t: t.get("rank", 0), reverse=True)
+            for item in data:
+                name = item.get("title", "")
+                artist = item.get("artist", {}).get("name", "")
+                url = item.get("link", "")
                 key = f"{name.lower()}|{artist.lower()}"
                 if name and artist and key not in seen:
                     seen.add(key)
                     tracks.append({"title": name, "artist": artist,
-                                   "url": url, "source": "Apple Music"})
+                                   "url": url, "source": "Deezer"})
     except Exception as e:
-        print(f"Apple exception: {e}")
+        print(f"Deezer exception: {e}")
     return tracks[:10]
 
 
-# ---------- Last.fm (free API key) ----------
-def get_lastfm_tracks():
-    if not LASTFM_API_KEY:
-        print("Last.fm: no API key, skipping")
-        return []
+# ---------- Bandcamp (public discovery feed) ----------
+def get_bandcamp_tracks():
+    """Bandcamp public discovery API — new & trending releases by tag."""
     tracks, seen = [], set()
     try:
-        for tag in ["house", "tech house", "deep house"]:
-            r = requests.get(
-                "https://ws.audioscrobbler.com/2.0/",
-                params={"method": "tag.gettoptracks", "tag": tag,
-                        "api_key": LASTFM_API_KEY, "format": "json", "limit": 6},
-                headers={"User-Agent": UA},
+        for tag in ["house", "deep-house", "tech-house"]:
+            r = requests.post(
+                "https://bandcamp.com/api/hub/2/dig_deeper",
+                json={"tag_norm_names": [tag], "sort": "pop", "page": 1},
+                headers={"User-Agent": UA, "Content-Type": "application/json"},
                 timeout=15,
             )
-            print(f"Last.fm '{tag}': HTTP {r.status_code}")
+            print(f"Bandcamp '{tag}': HTTP {r.status_code}")
             if r.status_code != 200:
                 continue
-            for item in r.json().get("tracks", {}).get("track", []):
-                name = item.get("name", "")
-                artist = item.get("artist", {}).get("name", "")
-                url = item.get("url", "")
+            items = r.json().get("items", [])
+            for item in items[:5]:
+                name = item.get("title", "")
+                artist = item.get("artist", "")
+                url = item.get("tralbum_url") or item.get("url", "")
                 key = f"{name.lower()}|{artist.lower()}"
                 if name and artist and key not in seen:
                     seen.add(key)
                     tracks.append({"title": name, "artist": artist,
-                                   "url": url, "source": "Last.fm"})
+                                   "url": url, "source": "Bandcamp"})
     except Exception as e:
-        print(f"Last.fm exception: {e}")
+        print(f"Bandcamp exception: {e}")
     return tracks[:10]
 
 
@@ -194,7 +193,7 @@ def format_message(tracks):
     by_source = {}
     for t in tracks:
         by_source.setdefault(t["source"], []).append(t)
-    icons = {"Beatport": "🔴", "Spotify": "🟢", "Apple Music": "⚪️", "Last.fm": "🔺"}
+    icons = {"Beatport": "🔴", "Spotify": "🟢", "Deezer": "🟣", "Bandcamp": "🔵"}
     for source, items in by_source.items():
         if not items:
             continue
@@ -241,13 +240,13 @@ def main():
     print(f"=> Spotify: {len(sp)}")
     all_tracks += sp
 
-    ap = get_apple_tracks()
-    print(f"=> Apple Music: {len(ap)}")
-    all_tracks += ap
+    dz = get_deezer_tracks()
+    print(f"=> Deezer: {len(dz)}")
+    all_tracks += dz
 
-    lf = get_lastfm_tracks()
-    print(f"=> Last.fm: {len(lf)}")
-    all_tracks += lf
+    bc = get_bandcamp_tracks()
+    print(f"=> Bandcamp: {len(bc)}")
+    all_tracks += bc
 
     bp = get_beatport_tracks()
     print(f"=> Beatport: {len(bp)}")
