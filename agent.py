@@ -129,45 +129,77 @@ def get_deezer_tracks():
     return tracks[:12]
 
 
-# ---------- Bandcamp (public tag page data) ----------
+# ---------- Bandcamp (public tag page HTML parsing) ----------
 def get_bandcamp_tracks():
-    """Bandcamp has no clean public tracks API. We read the genre tag page
-    and pull the embedded data island (most stable public method)."""
+    """Bandcamp shut down their public API. Proven method: parse the genre
+    tag page HTML — release items are <a class="item ..."> with title/artist
+    in child elements. Try data-blob first, fall back to HTML link parsing."""
     tracks, seen = [], set()
-    try:
-        for tag in ["house", "deep-house", "tech-house"]:
+    for tag in ["house", "deep-house", "tech-house"]:
+        try:
             r = requests.get(
-                f"https://bandcamp.com/tag/{tag}?tab=all_releases",
-                headers={"User-Agent": UA},
+                f"https://bandcamp.com/tag/{tag}",
+                headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"},
                 timeout=15,
             )
             print(f"Bandcamp '{tag}': HTTP {r.status_code}")
             if r.status_code != 200:
                 continue
-            # Bandcamp embeds JSON in a data-blob attribute
-            m = re.search(r'data-blob="([^"]+)"', r.text)
-            if not m:
-                print(f"Bandcamp '{tag}': data-blob not found")
-                continue
-            import html as _html
-            blob = json.loads(_html.unescape(m.group(1)))
-            # Navigate to the items list (structure: hub -> dig_deeper or tabs)
-            items = []
-            hub = blob.get("hub", {})
-            for tab in hub.get("tabs", []):
-                for coll in tab.get("collections", []):
-                    items.extend(coll.get("items", []))
-            for item in items[:6]:
-                name = item.get("title", "")
-                artist = item.get("artist", "") or item.get("band_name", "")
-                url = item.get("tralbum_url") or item.get("url", "")
-                key = f"{name.lower()}|{artist.lower()}"
-                if name and artist and key not in seen:
-                    seen.add(key)
-                    tracks.append({"title": name, "artist": artist,
-                                   "url": url, "source": "Bandcamp"})
-    except Exception as e:
-        print(f"Bandcamp exception: {e}")
+            html_text = r.text
+            found_before = len(tracks)
+
+            # --- Method 1: data-blob JSON (newer tag pages) ---
+            m = re.search(r'data-blob="([^"]+)"', html_text)
+            if m:
+                try:
+                    import html as _html
+                    blob = json.loads(_html.unescape(m.group(1)))
+                    # results can live in several places depending on page version
+                    candidates = []
+                    hub = blob.get("hub", {})
+                    if isinstance(hub, dict):
+                        for tab in hub.get("tabs", []):
+                            for coll in tab.get("collections", []):
+                                candidates.extend(coll.get("items", []))
+                            candidates.extend(tab.get("dig_deeper", {}).get("results", []) or [])
+                    candidates.extend(blob.get("items", []) or [])
+                    for item in candidates:
+                        if not isinstance(item, dict):
+                            continue
+                        name = item.get("title") or item.get("primary_text") or ""
+                        artist = item.get("artist") or item.get("band_name") or item.get("secondary_text") or ""
+                        url = item.get("tralbum_url") or item.get("url") or item.get("item_url") or ""
+                        key = f"{name.lower()}|{artist.lower()}"
+                        if name and artist and key not in seen:
+                            seen.add(key)
+                            tracks.append({"title": name.strip(), "artist": artist.strip(),
+                                           "url": url, "source": "Bandcamp"})
+                except Exception as e:
+                    print(f"Bandcamp '{tag}' blob parse: {e}")
+
+            # --- Method 2: HTML item links (works on classic tag pages) ---
+            if len(tracks) == found_before:
+                # Each release: <a class="item_link" href="..."> ... <div class="itemtext">title</div> <div class="itemsubtext">artist</div>
+                for block in re.findall(r'<a class="item[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.S)[:8]:
+                    href, inner = block
+                    tm = re.search(r'<div class="item[_-]?title[^"]*">(.*?)</div>', inner, re.S) \
+                         or re.search(r'<div class="itemtext">(.*?)</div>', inner, re.S)
+                    am = re.search(r'<div class="item[_-]?artist[^"]*">(.*?)</div>', inner, re.S) \
+                         or re.search(r'<div class="itemsubtext">(.*?)</div>', inner, re.S)
+                    if not tm:
+                        continue
+                    name = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+                    artist = re.sub(r"<[^>]+>", "", am.group(1)).strip() if am else ""
+                    key = f"{name.lower()}|{artist.lower()}"
+                    if name and key not in seen:
+                        seen.add(key)
+                        tracks.append({"title": name, "artist": artist or "Bandcamp artist",
+                                       "url": href, "source": "Bandcamp"})
+
+            if len(tracks) == found_before:
+                print(f"Bandcamp '{tag}': no items parsed")
+        except Exception as e:
+            print(f"Bandcamp '{tag}' exception: {e}")
     return tracks[:10]
 
 
@@ -218,6 +250,11 @@ def deduplicate(all_tracks):
     return result
 
 
+def escape_url(url):
+    """In MarkdownV2 link destinations, ) and \\ must be escaped."""
+    return url.replace("\\", "\\\\").replace(")", "\\)")
+
+
 def format_message(tracks):
     week = datetime.now().strftime("%d.%m.%Y")
     lines = ["🎵 *House Music — топ недели " + escape_md(week) + "*\n"]
@@ -234,7 +271,7 @@ def format_message(tracks):
             artist = escape_md(t["artist"] or "—")
             url = t.get("url", "")
             if url:
-                lines.append(f"{i}\\. [{artist} — {title}]({url})")
+                lines.append(f"{i}\\. [{artist} — {title}]({escape_url(url)})")
             else:
                 lines.append(f"{i}\\. {artist} — {title}")
     lines.append("\n_Обновляется автоматически каждый понедельник_")
