@@ -8,12 +8,12 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
+LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "").strip()
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 
 def escape_md(text):
-    """Escape ALL MarkdownV2 reserved chars."""
     text = str(text)
     for ch in r"_*[]()~`>#+-=|{}.!\\":
         text = text.replace(ch, "\\" + ch)
@@ -33,7 +33,7 @@ def get_spotify_token():
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
-        print(f"Spotify token request: HTTP {r.status_code}")
+        print(f"Spotify token: HTTP {r.status_code}")
         if r.status_code != 200:
             print(f"  body: {r.text[:200]}")
             return None
@@ -47,16 +47,8 @@ def get_spotify_tracks(token):
     if not token:
         return []
     headers = {"Authorization": f"Bearer {token}"}
-    tracks = []
-    seen = set()
-
-    # Search tracks directly by genre+year tag — robust, no playlist dependency
-    queries = [
-        'genre:"house" year:2026',
-        'genre:"deep-house"',
-        'genre:"tech-house"',
-    ]
-
+    tracks, seen = [], set()
+    queries = ['genre:"house" year:2026', 'genre:"deep-house"', 'genre:"tech-house"']
     for q in queries:
         try:
             r = requests.get(
@@ -69,8 +61,6 @@ def get_spotify_tracks(token):
                 print(f"Spotify search '{q}': HTTP {r.status_code} {r.text[:120]}")
                 continue
             items = r.json().get("tracks", {}).get("items", [])
-            # sort by popularity desc
-            items.sort(key=lambda t: t.get("popularity", 0), reverse=True)
             for track in items:
                 if not track:
                     continue
@@ -85,20 +75,78 @@ def get_spotify_tracks(token):
                                    "source": "Spotify", "pop": pop})
         except Exception as e:
             print(f"Spotify search '{q}' exception: {e}")
-
     tracks.sort(key=lambda t: t["pop"], reverse=True)
-    return tracks[:15]
+    return tracks[:12]
+
+
+# ---------- Apple Music (iTunes Search API, no key needed) ----------
+def get_apple_tracks():
+    """iTunes Search API — genreId 7 = Dance. Free, no auth."""
+    tracks, seen = [], set()
+    try:
+        for term in ["house", "tech house", "deep house"]:
+            r = requests.get(
+                "https://itunes.apple.com/search",
+                params={"term": term, "entity": "song", "genreId": "7",
+                        "limit": 6, "country": "US"},
+                headers={"User-Agent": UA},
+                timeout=15,
+            )
+            print(f"Apple '{term}': HTTP {r.status_code}")
+            if r.status_code != 200:
+                continue
+            for item in r.json().get("results", []):
+                name = item.get("trackName", "")
+                artist = item.get("artistName", "")
+                url = item.get("trackViewUrl", "")
+                key = f"{name.lower()}|{artist.lower()}"
+                if name and artist and key not in seen:
+                    seen.add(key)
+                    tracks.append({"title": name, "artist": artist,
+                                   "url": url, "source": "Apple Music"})
+    except Exception as e:
+        print(f"Apple exception: {e}")
+    return tracks[:10]
+
+
+# ---------- Last.fm (free API key) ----------
+def get_lastfm_tracks():
+    if not LASTFM_API_KEY:
+        print("Last.fm: no API key, skipping")
+        return []
+    tracks, seen = [], set()
+    try:
+        for tag in ["house", "tech house", "deep house"]:
+            r = requests.get(
+                "https://ws.audioscrobbler.com/2.0/",
+                params={"method": "tag.gettoptracks", "tag": tag,
+                        "api_key": LASTFM_API_KEY, "format": "json", "limit": 6},
+                headers={"User-Agent": UA},
+                timeout=15,
+            )
+            print(f"Last.fm '{tag}': HTTP {r.status_code}")
+            if r.status_code != 200:
+                continue
+            for item in r.json().get("tracks", {}).get("track", []):
+                name = item.get("name", "")
+                artist = item.get("artist", {}).get("name", "")
+                url = item.get("url", "")
+                key = f"{name.lower()}|{artist.lower()}"
+                if name and artist and key not in seen:
+                    seen.add(key)
+                    tracks.append({"title": name, "artist": artist,
+                                   "url": url, "source": "Last.fm"})
+    except Exception as e:
+        print(f"Last.fm exception: {e}")
+    return tracks[:10]
 
 
 # ---------- Beatport ----------
 def get_beatport_tracks():
     tracks = []
     try:
-        r = requests.get(
-            "https://www.beatport.com/genre/house/5/top-100",
-            headers={"User-Agent": UA},
-            timeout=15,
-        )
+        r = requests.get("https://www.beatport.com/genre/house/5/top-100",
+                         headers={"User-Agent": UA}, timeout=15)
         print(f"Beatport: HTTP {r.status_code}")
         m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', r.text, re.S)
         if not m:
@@ -115,18 +163,13 @@ def get_beatport_tracks():
                     if not isinstance(item, dict):
                         continue
                     name = item.get("name") or item.get("mix_name") or ""
-                    mix = item.get("mix_name", "")
                     artists = item.get("artists", [])
                     artist = ", ".join(a.get("name", "") for a in artists) if artists else ""
-                    slug = item.get("slug", "")
-                    tid = item.get("id", "")
+                    slug, tid = item.get("slug", ""), item.get("id", "")
                     if name and artist:
-                        full = f"{name} ({mix})" if mix and mix not in name else name
-                        tracks.append({
-                            "title": full, "artist": artist, "source": "Beatport",
-                            "url": f"https://www.beatport.com/track/{slug}/{tid}" if slug and tid
-                                   else "https://www.beatport.com/genre/house/5/top-100",
-                        })
+                        tracks.append({"title": name, "artist": artist, "source": "Beatport",
+                                       "url": f"https://www.beatport.com/track/{slug}/{tid}" if slug and tid
+                                              else "https://www.beatport.com/genre/house/5/top-100"})
                 if tracks:
                     break
     except Exception as e:
@@ -151,7 +194,7 @@ def format_message(tracks):
     by_source = {}
     for t in tracks:
         by_source.setdefault(t["source"], []).append(t)
-    icons = {"Beatport": "🔴", "Spotify": "🟢"}
+    icons = {"Beatport": "🔴", "Spotify": "🟢", "Apple Music": "⚪️", "Last.fm": "🔺"}
     for source, items in by_source.items():
         if not items:
             continue
@@ -177,14 +220,11 @@ def send_telegram(text):
     )
     if r.status_code != 200:
         print(f"Telegram error {r.status_code}: {r.text}")
-        # Fallback: send as plain text (no markdown) so user always gets something
-        plain = re.sub(r"\\(.)", r"\1", text)  # unescape
-        plain = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 — \2", plain)  # links -> text
-        plain = plain.replace("*", "")
+        plain = re.sub(r"\\(.)", r"\1", text)
+        plain = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 — \2", plain).replace("*", "")
         r2 = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": plain,
-                  "disable_web_page_preview": True},
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": plain, "disable_web_page_preview": True},
             timeout=15,
         )
         print(f"Telegram plain fallback: HTTP {r2.status_code}")
@@ -198,15 +238,23 @@ def main():
 
     token = get_spotify_token()
     sp = get_spotify_tracks(token)
-    print(f"Spotify: {len(sp)} tracks")
+    print(f"=> Spotify: {len(sp)}")
     all_tracks += sp
 
+    ap = get_apple_tracks()
+    print(f"=> Apple Music: {len(ap)}")
+    all_tracks += ap
+
+    lf = get_lastfm_tracks()
+    print(f"=> Last.fm: {len(lf)}")
+    all_tracks += lf
+
     bp = get_beatport_tracks()
-    print(f"Beatport: {len(bp)} tracks")
+    print(f"=> Beatport: {len(bp)}")
     all_tracks += bp
 
     unique = deduplicate(all_tracks)
-    print(f"Total unique: {len(unique)}")
+    print(f"=> Total unique: {len(unique)}")
 
     if not unique:
         send_telegram(escape_md("⚠️ House Agent: источники недоступны на этой неделе. Загляните в логи GitHub Actions."))
