@@ -80,23 +80,42 @@ def get_spotify_tracks(token):
 
 # ---------- Deezer (public API, no key) ----------
 def get_deezer_tracks():
-    """Deezer public API. Search by genre, sort by rank. No auth needed."""
+    """Deezer public API. Pull tracks from real house/electro genre playlists
+    (editorial), not text search — so only actual genre tracks come through."""
     tracks, seen = [], set()
     try:
-        for term in ["house", "tech house", "deep house"]:
+        # Find editorial playlists that are genuinely house/electro, then read their tracks.
+        # Deezer search?type=playlist returns curated playlists; we keep only on-genre ones.
+        playlist_queries = ["deep house", "tech house", "house music", "afro house"]
+        playlist_ids = []
+        for q in playlist_queries:
             r = requests.get(
-                "https://api.deezer.com/search",
-                params={"q": f'genre:"{term}"' if False else term, "order": "RANKING", "limit": 8},
+                "https://api.deezer.com/search/playlist",
+                params={"q": q, "limit": 2},
                 headers={"User-Agent": UA},
                 timeout=15,
             )
-            print(f"Deezer '{term}': HTTP {r.status_code}")
+            print(f"Deezer playlist search '{q}': HTTP {r.status_code}")
+            if r.status_code != 200:
+                continue
+            for pl in r.json().get("data", []):
+                title = (pl.get("title") or "").lower()
+                # keep only playlists whose title actually signals the genre
+                if "house" in title and pl.get("id"):
+                    playlist_ids.append(pl["id"])
+
+        for pid in playlist_ids[:5]:
+            r = requests.get(
+                f"https://api.deezer.com/playlist/{pid}/tracks",
+                params={"limit": 6},
+                headers={"User-Agent": UA},
+                timeout=15,
+            )
             if r.status_code != 200:
                 continue
             data = r.json().get("data", [])
-            # sort by rank desc when present
             data.sort(key=lambda t: t.get("rank", 0), reverse=True)
-            for item in data:
+            for item in data[:6]:
                 name = item.get("title", "")
                 artist = item.get("artist", {}).get("name", "")
                 url = item.get("link", "")
@@ -107,28 +126,40 @@ def get_deezer_tracks():
                                    "url": url, "source": "Deezer"})
     except Exception as e:
         print(f"Deezer exception: {e}")
-    return tracks[:10]
+    return tracks[:12]
 
 
-# ---------- Bandcamp (public discovery feed) ----------
+# ---------- Bandcamp (public tag page data) ----------
 def get_bandcamp_tracks():
-    """Bandcamp public discovery API — new & trending releases by tag."""
+    """Bandcamp has no clean public tracks API. We read the genre tag page
+    and pull the embedded data island (most stable public method)."""
     tracks, seen = [], set()
     try:
         for tag in ["house", "deep-house", "tech-house"]:
-            r = requests.post(
-                "https://bandcamp.com/api/hub/2/dig_deeper",
-                json={"tag_norm_names": [tag], "sort": "pop", "page": 1},
-                headers={"User-Agent": UA, "Content-Type": "application/json"},
+            r = requests.get(
+                f"https://bandcamp.com/tag/{tag}?tab=all_releases",
+                headers={"User-Agent": UA},
                 timeout=15,
             )
             print(f"Bandcamp '{tag}': HTTP {r.status_code}")
             if r.status_code != 200:
                 continue
-            items = r.json().get("items", [])
-            for item in items[:5]:
+            # Bandcamp embeds JSON in a data-blob attribute
+            m = re.search(r'data-blob="([^"]+)"', r.text)
+            if not m:
+                print(f"Bandcamp '{tag}': data-blob not found")
+                continue
+            import html as _html
+            blob = json.loads(_html.unescape(m.group(1)))
+            # Navigate to the items list (structure: hub -> dig_deeper or tabs)
+            items = []
+            hub = blob.get("hub", {})
+            for tab in hub.get("tabs", []):
+                for coll in tab.get("collections", []):
+                    items.extend(coll.get("items", []))
+            for item in items[:6]:
                 name = item.get("title", "")
-                artist = item.get("artist", "")
+                artist = item.get("artist", "") or item.get("band_name", "")
                 url = item.get("tralbum_url") or item.get("url", "")
                 key = f"{name.lower()}|{artist.lower()}"
                 if name and artist and key not in seen:
