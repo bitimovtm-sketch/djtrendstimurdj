@@ -129,77 +129,58 @@ def get_deezer_tracks():
     return tracks[:12]
 
 
-# ---------- Bandcamp (public tag page HTML parsing) ----------
+# ---------- Bandcamp (Discover API) ----------
 def get_bandcamp_tracks():
-    """Bandcamp shut down their public API. Proven method: parse the genre
-    tag page HTML — release items are <a class="item ..."> with title/artist
-    in child elements. Try data-blob first, fall back to HTML link parsing."""
+    """Modern Bandcamp /discover/house loads items via POST to the Discover API.
+    We call that endpoint directly with the house genre slug."""
     tracks, seen = [], set()
-    for tag in ["house", "deep-house", "tech-house"]:
+    # The discover endpoint the site itself uses to populate /discover/<genre>
+    endpoints = [
+        "https://bandcamp.com/api/discover/1/discover_web",
+        "https://bandcamp.com/api/discover/3/get_web",
+    ]
+    payloads = [
+        {"category_id": 0, "tag_norm_names": ["house"], "geoname_id": 0,
+         "slice": "top", "cursor": "*", "size": 8, "include_result_types": ["a", "t"]},
+        {"category_id": 0, "slug": "house", "geoname_id": 6252001,
+         "size": 8, "sort": "pop"},
+    ]
+    for ep, payload in zip(endpoints, payloads):
         try:
-            r = requests.get(
-                f"https://bandcamp.com/tag/{tag}",
-                headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"},
-                timeout=15,
-            )
-            print(f"Bandcamp '{tag}': HTTP {r.status_code}")
+            r = requests.post(ep, json=payload,
+                              headers={"User-Agent": UA, "Content-Type": "application/json",
+                                       "Accept": "application/json"},
+                              timeout=15)
+            print(f"Bandcamp {ep.split('/')[-1]}: HTTP {r.status_code}")
             if r.status_code != 200:
                 continue
-            html_text = r.text
-            found_before = len(tracks)
-
-            # --- Method 1: data-blob JSON (newer tag pages) ---
-            m = re.search(r'data-blob="([^"]+)"', html_text)
-            if m:
-                try:
-                    import html as _html
-                    blob = json.loads(_html.unescape(m.group(1)))
-                    # results can live in several places depending on page version
-                    candidates = []
-                    hub = blob.get("hub", {})
-                    if isinstance(hub, dict):
-                        for tab in hub.get("tabs", []):
-                            for coll in tab.get("collections", []):
-                                candidates.extend(coll.get("items", []))
-                            candidates.extend(tab.get("dig_deeper", {}).get("results", []) or [])
-                    candidates.extend(blob.get("items", []) or [])
-                    for item in candidates:
-                        if not isinstance(item, dict):
-                            continue
-                        name = item.get("title") or item.get("primary_text") or ""
-                        artist = item.get("artist") or item.get("band_name") or item.get("secondary_text") or ""
-                        url = item.get("tralbum_url") or item.get("url") or item.get("item_url") or ""
-                        key = f"{name.lower()}|{artist.lower()}"
-                        if name and artist and key not in seen:
-                            seen.add(key)
-                            tracks.append({"title": name.strip(), "artist": artist.strip(),
-                                           "url": url, "source": "Bandcamp"})
-                except Exception as e:
-                    print(f"Bandcamp '{tag}' blob parse: {e}")
-
-            # --- Method 2: HTML item links (works on classic tag pages) ---
-            if len(tracks) == found_before:
-                # Each release: <a class="item_link" href="..."> ... <div class="itemtext">title</div> <div class="itemsubtext">artist</div>
-                for block in re.findall(r'<a class="item[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.S)[:8]:
-                    href, inner = block
-                    tm = re.search(r'<div class="item[_-]?title[^"]*">(.*?)</div>', inner, re.S) \
-                         or re.search(r'<div class="itemtext">(.*?)</div>', inner, re.S)
-                    am = re.search(r'<div class="item[_-]?artist[^"]*">(.*?)</div>', inner, re.S) \
-                         or re.search(r'<div class="itemsubtext">(.*?)</div>', inner, re.S)
-                    if not tm:
-                        continue
-                    name = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
-                    artist = re.sub(r"<[^>]+>", "", am.group(1)).strip() if am else ""
-                    key = f"{name.lower()}|{artist.lower()}"
-                    if name and key not in seen:
-                        seen.add(key)
-                        tracks.append({"title": name, "artist": artist or "Bandcamp artist",
-                                       "url": href, "source": "Bandcamp"})
-
-            if len(tracks) == found_before:
-                print(f"Bandcamp '{tag}': no items parsed")
+            data = r.json()
+            # results live under "results", "items", or "discover_web"
+            items = data.get("results") or data.get("items") or []
+            if isinstance(data.get("discover_web"), dict):
+                items = data["discover_web"].get("results", items)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("title") or item.get("primary_text") or item.get("album_title") or ""
+                artist = (item.get("artist") or item.get("band_name")
+                          or item.get("secondary_text") or item.get("band", {}).get("name", "")
+                          if isinstance(item.get("band"), dict) else item.get("artist", ""))
+                if not artist:
+                    artist = item.get("band_name", "") or item.get("secondary_text", "")
+                url = item.get("item_url") or item.get("url") or item.get("tralbum_url") or ""
+                name, artist = str(name).strip(), str(artist).strip()
+                key = f"{name.lower()}|{artist.lower()}"
+                if name and artist and key not in seen:
+                    seen.add(key)
+                    tracks.append({"title": name, "artist": artist,
+                                   "url": url, "source": "Bandcamp"})
+            if tracks:
+                break
         except Exception as e:
-            print(f"Bandcamp '{tag}' exception: {e}")
+            print(f"Bandcamp {ep.split('/')[-1]} exception: {e}")
+    if not tracks:
+        print("Bandcamp: no items from Discover API")
     return tracks[:10]
 
 
@@ -250,14 +231,14 @@ def deduplicate(all_tracks):
     return result
 
 
-def escape_url(url):
-    """In MarkdownV2 link destinations, ) and \\ must be escaped."""
-    return url.replace("\\", "\\\\").replace(")", "\\)")
+def escape_html(text):
+    """HTML parse_mode needs only these three escaped."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
 def format_message(tracks):
     week = datetime.now().strftime("%d.%m.%Y")
-    lines = ["🎵 *House Music — топ недели " + escape_md(week) + "*\n"]
+    lines = ["🎵 <b>House Music — топ недели " + escape_html(week) + "</b>\n"]
     by_source = {}
     for t in tracks:
         by_source.setdefault(t["source"], []).append(t)
@@ -265,30 +246,33 @@ def format_message(tracks):
     for source, items in by_source.items():
         if not items:
             continue
-        lines.append("\n" + icons.get(source, "▪️") + " *" + escape_md(source) + "*")
+        lines.append("\n" + icons.get(source, "▪️") + " <b>" + escape_html(source) + "</b>")
         for i, t in enumerate(items, 1):
-            title = escape_md(t["title"] or "—")
-            artist = escape_md(t["artist"] or "—")
-            url = t.get("url", "")
+            title = escape_html(t["title"] or "—")
+            artist = escape_html(t["artist"] or "—")
+            url = escape_html(t.get("url", ""))
             if url:
-                lines.append(f"{i}\\. [{artist} — {title}]({escape_url(url)})")
+                lines.append(f'{i}. <a href="{url}">{artist} — {title}</a>')
             else:
-                lines.append(f"{i}\\. {artist} — {title}")
-    lines.append("\n_Обновляется автоматически каждый понедельник_")
+                lines.append(f"{i}. {artist} — {title}")
+    lines.append("\n<i>Обновляется автоматически каждый понедельник</i>")
     return "\n".join(lines)
 
 
-def send_telegram(text):
+def send_telegram(text, html=True):
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text,
+               "disable_web_page_preview": True}
+    if html:
+        payload["parse_mode"] = "HTML"
     r = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
-              "parse_mode": "MarkdownV2", "disable_web_page_preview": True},
-        timeout=15,
+        json=payload, timeout=15,
     )
     if r.status_code != 200:
         print(f"Telegram error {r.status_code}: {r.text}")
-        plain = re.sub(r"\\(.)", r"\1", text)
-        plain = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 — \2", plain).replace("*", "")
+        # Fallback: strip tags, send plain
+        plain = re.sub(r"<a href=\"([^\"]+)\">([^<]+)</a>", r"\2 — \1", text)
+        plain = re.sub(r"</?[^>]+>", "", plain)
         r2 = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": plain, "disable_web_page_preview": True},
@@ -324,7 +308,7 @@ def main():
     print(f"=> Total unique: {len(unique)}")
 
     if not unique:
-        send_telegram(escape_md("⚠️ House Agent: источники недоступны на этой неделе. Загляните в логи GitHub Actions."))
+        send_telegram("⚠️ House Agent: источники недоступны на этой неделе. Загляните в логи GitHub Actions.", html=False)
         return
 
     send_telegram(format_message(unique))
