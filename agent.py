@@ -129,56 +129,60 @@ def get_deezer_tracks():
     return tracks[:12]
 
 
-# ---------- Bandcamp (Discover API) ----------
+# ---------- Bandcamp (Discover API - verified structure) ----------
 def get_bandcamp_tracks():
-    """Modern Bandcamp /discover/house loads items via POST to the Discover API.
-    We call that endpoint directly with the house genre slug."""
+    """POST to the same endpoint the /discover/house page uses.
+    Verified response shape: {"results": [{"title","band_name","item_url",
+    "band_genre_id","featured_track":{...}}]}. genre_id 10 = electronic."""
     tracks, seen = [], set()
-    # The discover endpoint the site itself uses to populate /discover/<genre>
-    endpoints = [
-        "https://bandcamp.com/api/discover/1/discover_web",
-        "https://bandcamp.com/api/discover/3/get_web",
-    ]
+    url = "https://bandcamp.com/api/discover/1/discover_web"
+    # Try a few payload shapes; the site sends a discover_spec describing the genre.
     payloads = [
-        {"category_id": 0, "tag_norm_names": ["house"], "geoname_id": 0,
-         "slice": "top", "cursor": "*", "size": 8, "include_result_types": ["a", "t"]},
-        {"category_id": 0, "slug": "house", "geoname_id": 6252001,
-         "size": 8, "sort": "pop"},
+        {"tag_norm_names": ["house"], "category_id": 0, "geoname_id": 0,
+         "slice": "top", "time_facet_id": None, "cursor": "*", "size": 60,
+         "include_result_types": ["a", "t"]},
+        {"slug": "house", "category_id": 0, "size": 60, "cursor": "*"},
+        {"genre_id": 10, "tag_norm_names": ["house"], "size": 60, "cursor": "*"},
     ]
-    for ep, payload in zip(endpoints, payloads):
+    for payload in payloads:
         try:
-            r = requests.post(ep, json=payload,
-                              headers={"User-Agent": UA, "Content-Type": "application/json",
-                                       "Accept": "application/json"},
-                              timeout=15)
-            print(f"Bandcamp {ep.split('/')[-1]}: HTTP {r.status_code}")
+            r = requests.post(url, json=payload,
+                             headers={"User-Agent": UA,
+                                      "Content-Type": "application/json",
+                                      "Accept": "application/json",
+                                      "Referer": "https://bandcamp.com/discover/house"},
+                             timeout=15)
+            print(f"Bandcamp discover_web: HTTP {r.status_code}")
             if r.status_code != 200:
                 continue
-            data = r.json()
-            # results live under "results", "items", or "discover_web"
-            items = data.get("results") or data.get("items") or []
-            if isinstance(data.get("discover_web"), dict):
-                items = data["discover_web"].get("results", items)
-            for item in items:
+            try:
+                data = r.json()
+            except Exception:
+                print(f"Bandcamp: non-JSON for payload keys {list(payload.keys())}")
+                continue
+            results = data.get("results", [])
+            if not results:
+                continue
+            for item in results:
                 if not isinstance(item, dict):
                     continue
-                name = item.get("title") or item.get("primary_text") or item.get("album_title") or ""
-                artist = (item.get("artist") or item.get("band_name")
-                          or item.get("secondary_text") or item.get("band", {}).get("name", "")
-                          if isinstance(item.get("band"), dict) else item.get("artist", ""))
-                if not artist:
-                    artist = item.get("band_name", "") or item.get("secondary_text", "")
-                url = item.get("item_url") or item.get("url") or item.get("tralbum_url") or ""
+                # prefer the featured track title if present, else album title
+                ft = item.get("featured_track") or {}
+                name = (ft.get("title") if isinstance(ft, dict) else None) or item.get("title", "")
+                artist = item.get("band_name") or item.get("album_artist") or ""
+                bc_url = item.get("item_url", "")
+                if bc_url:
+                    bc_url = bc_url.split("?")[0]  # strip ?from=discover_page
                 name, artist = str(name).strip(), str(artist).strip()
                 key = f"{name.lower()}|{artist.lower()}"
                 if name and artist and key not in seen:
                     seen.add(key)
                     tracks.append({"title": name, "artist": artist,
-                                   "url": url, "source": "Bandcamp"})
+                                   "url": bc_url, "source": "Bandcamp"})
             if tracks:
                 break
         except Exception as e:
-            print(f"Bandcamp {ep.split('/')[-1]} exception: {e}")
+            print(f"Bandcamp discover_web exception: {e}")
     if not tracks:
         print("Bandcamp: no items from Discover API")
     return tracks[:10]
