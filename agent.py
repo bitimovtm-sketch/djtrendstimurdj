@@ -136,8 +136,6 @@ def get_bandcamp_tracks():
     "band_genre_id","featured_track":{...}}]}. genre_id 10 = electronic."""
     tracks, seen = [], set()
     url = "https://bandcamp.com/api/discover/1/discover_web"
-    # EXACT payload the site sends (verified via DevTools). Key detail:
-    # include_result_types is ["a","s"] (albums + songs), not "t".
     payload = {
         "category_id": 0,
         "tag_norm_names": ["house"],
@@ -148,19 +146,35 @@ def get_bandcamp_tracks():
         "size": 60,
         "include_result_types": ["a", "s"],
     }
+    # Full browser-like headers + a real session so cookies (BACKENDID3 etc.) get set.
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/json; charset=UTF-8",
+        "Origin": "https://bandcamp.com",
+        "Referer": "https://bandcamp.com/discover/house",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Ch-Ua": '"Chromium";v="120", "Google Chrome";v="120", "Not/A)Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"macOS"',
+    }
     try:
-        r = requests.post(url, json=payload,
-                         headers={"User-Agent": UA,
-                                  "Content-Type": "application/json",
-                                  "Accept": "application/json",
-                                  "Referer": "https://bandcamp.com/discover/house"},
-                         timeout=15)
+        session = requests.Session()
+        # Step 1: GET the discover page so the server hands us session cookies.
+        session.get("https://bandcamp.com/discover/house",
+                   headers={"User-Agent": headers["User-Agent"]}, timeout=15)
+        # Step 2: POST the discover query with those cookies + browser headers.
+        r = session.post(url, json=payload, headers=headers, timeout=15)
         print(f"Bandcamp discover_web: HTTP {r.status_code}")
         if r.status_code == 200:
             try:
                 data = r.json()
             except Exception:
-                print("Bandcamp: response was not JSON")
+                print(f"Bandcamp: response not JSON (first 100 chars): {r.text[:100]!r}")
                 data = {}
             for item in data.get("results", []):
                 if not isinstance(item, dict):
