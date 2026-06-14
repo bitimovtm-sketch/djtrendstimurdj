@@ -129,75 +129,6 @@ def get_deezer_tracks():
     return tracks[:12]
 
 
-# ---------- Bandcamp (Discover API - verified structure) ----------
-def get_bandcamp_tracks():
-    """POST to the same endpoint the /discover/house page uses.
-    Verified response shape: {"results": [{"title","band_name","item_url",
-    "band_genre_id","featured_track":{...}}]}. genre_id 10 = electronic."""
-    tracks, seen = [], set()
-    url = "https://bandcamp.com/api/discover/1/discover_web"
-    payload = {
-        "category_id": 0,
-        "tag_norm_names": ["house"],
-        "geoname_id": 0,
-        "slice": "top",
-        "time_facet_id": None,
-        "cursor": "*",
-        "size": 60,
-        "include_result_types": ["a", "s"],
-    }
-    # Full browser-like headers + a real session so cookies (BACKENDID3 etc.) get set.
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/json; charset=UTF-8",
-        "Origin": "https://bandcamp.com",
-        "Referer": "https://bandcamp.com/discover/house",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Ch-Ua": '"Chromium";v="120", "Google Chrome";v="120", "Not/A)Brand";v="99"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"macOS"',
-    }
-    try:
-        session = requests.Session()
-        # Step 1: GET the discover page so the server hands us session cookies.
-        session.get("https://bandcamp.com/discover/house",
-                   headers={"User-Agent": headers["User-Agent"]}, timeout=15)
-        # Step 2: POST the discover query with those cookies + browser headers.
-        r = session.post(url, json=payload, headers=headers, timeout=15)
-        print(f"Bandcamp discover_web: HTTP {r.status_code}")
-        if r.status_code == 200:
-            try:
-                data = r.json()
-            except Exception:
-                print(f"Bandcamp: response not JSON (first 100 chars): {r.text[:100]!r}")
-                data = {}
-            for item in data.get("results", []):
-                if not isinstance(item, dict):
-                    continue
-                ft = item.get("featured_track") or {}
-                name = (ft.get("title") if isinstance(ft, dict) else None) or item.get("title", "")
-                artist = item.get("band_name") or item.get("album_artist") or ""
-                bc_url = item.get("item_url", "")
-                if bc_url:
-                    bc_url = bc_url.split("?")[0]
-                name, artist = str(name).strip(), str(artist).strip()
-                key = f"{name.lower()}|{artist.lower()}"
-                if name and artist and key not in seen:
-                    seen.add(key)
-                    tracks.append({"title": name, "artist": artist,
-                                   "url": bc_url, "source": "Bandcamp"})
-    except Exception as e:
-        print(f"Bandcamp discover_web exception: {e}")
-    if not tracks:
-        print("Bandcamp: no items from Discover API")
-    return tracks[:10]
-
-
 # ---------- Beatport ----------
 def get_beatport_tracks():
     tracks = []
@@ -256,7 +187,7 @@ def format_message(tracks):
     by_source = {}
     for t in tracks:
         by_source.setdefault(t["source"], []).append(t)
-    icons = {"Beatport": "🔴", "Spotify": "🟢", "Deezer": "🟣", "Bandcamp": "🔵"}
+    icons = {"Beatport": "🔴", "Spotify": "🟢", "Deezer": "🟣"}
     for source, items in by_source.items():
         if not items:
             continue
@@ -309,10 +240,6 @@ def main():
     dz = get_deezer_tracks()
     print(f"=> Deezer: {len(dz)}")
     all_tracks += dz
-
-    bc = get_bandcamp_tracks()
-    print(f"=> Bandcamp: {len(bc)}")
-    all_tracks += bc
 
     bp = get_beatport_tracks()
     print(f"=> Beatport: {len(bp)}")
